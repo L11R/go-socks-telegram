@@ -26,8 +26,6 @@ var (
 type Config struct {
 	// Func to valid username/password pair
 	ValidAuth func(username, password string) bool
-	// Use username/password auth
-	UsernamePasswordAuth bool
 	// Connections per user limit
 	ConnsPerUser int
 	// Verbose logs
@@ -126,7 +124,7 @@ func (srv *Server) handShake(conn net.Conn) (*AuthContext, error) {
 	*/
 
 	// Do we need to use username/password auth?
-	if !srv.config.UsernamePasswordAuth {
+	if srv.config.ValidAuth == nil {
 		_, err := conn.Write([]byte{socksVer5, 0})
 		if err != nil {
 			return nil, err
