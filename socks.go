@@ -1,15 +1,16 @@
 package socks
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"strconv"
+	"sync"
 	"time"
-	"fmt"
-	"bufio"
 )
 
 var (
@@ -23,14 +24,25 @@ var (
 )
 
 type Config struct {
+	// Func to valid username/password pair
 	ValidAuth func(username, password string) bool
+	// Use username/password auth
 	UsernamePasswordAuth bool
+	// Connections per user limit
+	ConnsPerUser int
+	// Verbose logs
 	Verbose bool
 }
 
 type Server struct {
-	Conns   []net.Conn
-	config  *Config
+	Conns     []net.Conn
+	UserConns sync.Map
+	config    *Config
+}
+
+type AuthContext struct {
+	Method  int
+	Payload map[string]string
 }
 
 const (
@@ -46,7 +58,7 @@ func NewServer(config *Config) *Server {
 	}
 
 	server := &Server{
-		Conns: make([]net.Conn, 0),
+		Conns:  make([]net.Conn, 0),
 		config: config,
 	}
 
@@ -70,7 +82,7 @@ func netCopy(input, output net.Conn) (err error) {
 	return
 }
 
-func (srv *Server) handShake(conn net.Conn) (err error) {
+func (srv *Server) handShake(conn net.Conn) (*AuthContext, error) {
 	const (
 		idVer     = 0
 		idNmethod = 1
@@ -78,31 +90,30 @@ func (srv *Server) handShake(conn net.Conn) (err error) {
 
 	buf := make([]byte, 258)
 
-	var n int
-
 	// Make sure we get the nmethod field
-	if n, err = io.ReadAtLeast(conn, buf, idNmethod+1); err != nil {
-		return
+	n, err := io.ReadAtLeast(conn, buf, idNmethod+1)
+	if err != nil {
+		return nil, err
 	}
 
 	if buf[idVer] != socksVer5 {
-		return errVer
+		return nil, errVer
 	}
 
 	nmethods := int(buf[idNmethod]) // Client support auth mode
-	msgLen := nmethods + 2 // Auth msg length
+	msgLen := nmethods + 2          // Auth msg length
 
 	if n == msgLen {
 		// Handshake done, common case
 		// Do nothing, jump directly to auth methods
 	} else if n < msgLen {
 		// Has more methods to read
-		if _, err = io.ReadFull(conn, buf[n:msgLen]); err != nil {
-			return
+		if _, err := io.ReadFull(conn, buf[n:msgLen]); err != nil {
+			return nil, err
 		}
 	} else {
 		// Error, shouldn't get extra data
-		return errAuthExtraData
+		return nil, errAuthExtraData
 	}
 
 	/*
@@ -116,11 +127,17 @@ func (srv *Server) handShake(conn net.Conn) (err error) {
 
 	// Do we need to use username/password auth?
 	if !srv.config.UsernamePasswordAuth {
-		_, err = conn.Write([]byte{socksVer5, 0})
-		return
+		_, err := conn.Write([]byte{socksVer5, 0})
+		if err != nil {
+			return nil, err
+		}
+
+		return &AuthContext{
+			Method: 0,
+		}, nil
 	}
 
-	methods := buf[2:2+nmethods]
+	methods := buf[2 : 2+nmethods]
 
 	for _, method := range methods {
 		// It's username/password method
@@ -128,24 +145,25 @@ func (srv *Server) handShake(conn net.Conn) (err error) {
 			bufConn := bufio.NewReader(conn)
 
 			// Tell client to use USERNAME/PASSWORD auth method
-			if _, err = conn.Write([]byte{
+			if _, err := conn.Write([]byte{
 				socksVer5,
 				// USERNAME/PASSWORD auth method
 				2,
 			}); err != nil {
-				return
+				return nil, err
 			}
 
-			srv.authenticate(conn, bufConn)
-			return
+			return srv.authenticate(conn, bufConn)
 		}
 	}
 
 	conn.Write([]byte{socksVer5, 255})
-	return fmt.Errorf("[socks] no supported auth mechanism")
+	return &AuthContext{
+		Method: 255,
+	}, fmt.Errorf("[socks] no supported auth mechanism")
 }
 
-func (srv *Server) authenticate(conn net.Conn, bufConn io.Reader) (err error) {
+func (srv *Server) authenticate(conn net.Conn, bufConn io.Reader) (*AuthContext, error) {
 	const (
 		authVersion = 1
 		authSuccess = 0
@@ -154,55 +172,60 @@ func (srv *Server) authenticate(conn net.Conn, bufConn io.Reader) (err error) {
 
 	// Get version and username length
 	header := []byte{0, 0}
-	if _, err = io.ReadAtLeast(bufConn, header, 2); err != nil {
-		return
+	if _, err := io.ReadAtLeast(bufConn, header, 2); err != nil {
+		return nil, err
 	}
 
 	// Ensure about auth version
 	if header[0] != authVersion {
-		return fmt.Errorf("[socks] unsupported auth version: %v", header[0])
+		return nil, fmt.Errorf("[socks] unsupported auth version: %v", header[0])
 	}
 
 	// Get username
 	usernameLen := int(header[1])
 
 	usernameBytes := make([]byte, usernameLen)
-	if _, err = io.ReadAtLeast(bufConn, usernameBytes, usernameLen); err != nil {
-		return
+	if _, err := io.ReadAtLeast(bufConn, usernameBytes, usernameLen); err != nil {
+		return nil, err
 	}
 	username := string(usernameBytes)
 
 	// Get the password length
-	if _, err = bufConn.Read(header[:1]); err != nil {
-		return
+	if _, err := bufConn.Read(header[:1]); err != nil {
+		return nil, err
 	}
 
 	// Get password
 	passwordLen := int(header[0])
 
 	passwordBytes := make([]byte, passwordLen)
-	if _, err = io.ReadAtLeast(bufConn, passwordBytes, passwordLen); err != nil {
-		return
+	if _, err := io.ReadAtLeast(bufConn, passwordBytes, passwordLen); err != nil {
+		return nil, err
 	}
 	password := string(passwordBytes)
 
 	if srv.config.ValidAuth(username, password) {
-		if _, err = conn.Write([]byte{
+		if _, err := conn.Write([]byte{
 			authVersion,
 			authSuccess,
 		}); err != nil {
-			return
+			return nil, err
 		}
 	} else {
-		if _, err = conn.Write([]byte{
+		if _, err := conn.Write([]byte{
 			authVersion,
 			authFailure,
 		}); err != nil {
-			return
+			return nil, err
 		}
 	}
 
-	return
+	return &AuthContext{
+		Method: 2,
+		Payload: map[string]string{
+			"username": username,
+		},
+	}, nil
 }
 
 func (srv *Server) parseTarget(conn net.Conn) (host string, err error) {
@@ -348,7 +371,7 @@ func (srv *Server) pipeWhenClose(conn net.Conn, target string) {
 	}
 	rep[pindex] = byte((tcpAddr.Port >> 8) & 0xff)
 	rep[pindex+1] = byte(tcpAddr.Port & 0xff)
-	conn.Write(rep[0:pindex+2])
+	conn.Write(rep[0 : pindex+2])
 
 	// Copy local to remote
 	go netCopy(conn, remoteConn)
@@ -375,15 +398,51 @@ func (srv *Server) handleConnection(conn net.Conn) {
 
 	// Add new connection
 	srv.Conns = append(srv.Conns, conn)
-	if err := srv.handShake(conn); err != nil {
+	auth, err := srv.handShake(conn)
+	if err != nil {
 		log.Printf("[socks] handshake: %v\n", err)
 		return
+	}
+
+	// Check username in Payload map
+	if username, found := auth.Payload["username"]; found {
+		// Get count of connections from sync.Map
+		if count, found := srv.UserConns.Load(auth.Payload["Username"]); found {
+			// Don't forget to decrement one connection after closing it
+			defer srv.UserConns.Store(username, count.(int)-1)
+
+			// Refuse if there are more connections than we allow
+			if count.(int) > srv.config.ConnsPerUser {
+				log.Printf("[socks] failed to authenticate: max count of connections for %s has exceeded", username)
+				if _, err = conn.Write([]byte{
+					socksVer5,
+					5,
+				}); err != nil {
+					return
+				}
+
+				return
+			}
+
+			// Increment one connection
+			srv.UserConns.Store(username, count.(int)+1)
+		} else {
+			// If there are no connections, store one
+			srv.UserConns.Store(username, 1)
+		}
+
+		// Show it in log
+		if count, found := srv.UserConns.Load(username); found {
+			if srv.config.Verbose {
+				log.Printf("[socks] %d %s authenticated (%s)\n", count, username, conn.RemoteAddr())
+			}
+		}
 	}
 
 	// Parse
 	addr, err := srv.parseTarget(conn)
 	if err == io.EOF {
-		log.Printf("[socks] connection closed by client or server",)
+		log.Printf("[socks] connection closed by client or server")
 		return
 	} else if err != nil {
 		log.Printf("[socks] consult transfer mode or parse target: %v\n", err)
@@ -415,3 +474,27 @@ func (srv *Server) Serve(l net.Listener) error {
 		go srv.handleConnection(conn)
 	}
 }
+
+/*
+// FOR TESTING
+func main() {
+	// Create a SOCKS5 server
+	conf := &Config{
+		ValidAuth: func(username, password string) bool {
+			return true
+		},
+
+		UsernamePasswordAuth: true,
+		ConnsPerUser: 2,
+		Verbose: true,
+	}
+
+	server := NewServer(conf)
+
+	// Create SOCKS5 proxy on localhost
+	err := server.ListenAndServe("tcp", fmt.Sprintf(":%d", 1080))
+	if err != nil {
+		log.Println("ERROR: ", err.Error())
+	}
+}
+*/
