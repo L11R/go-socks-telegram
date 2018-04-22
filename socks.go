@@ -396,7 +396,9 @@ func (srv *Server) handleConnection(conn net.Conn) {
 			}
 		}
 
-		fmt.Println("[socks] closing connection...")
+		if srv.config.Verbose {
+			log.Printf("[socks] closing connection...\n")
+		}
 		conn.Close()
 	}()
 
