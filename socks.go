@@ -406,15 +406,16 @@ func (srv *Server) handleConnection(conn net.Conn) {
 	if username, found := auth.Payload["username"]; found {
 		// Get count of connections from sync.Map
 		if count, found := srv.UserConns.Load(username); found {
-			// Don't forget to decrement one connection after closing it
+			// Wrap it, because count changes
 			defer func() {
 				if count, found := srv.UserConns.Load(username); found {
+					// Don't forget to decrement one connection after closing it
 					srv.UserConns.Store(username, count.(int)-1)
 				}
 			}()
 
 			// Refuse if there are more connections than we allow
-			if count.(int) > srv.config.ConnsPerUser {
+			if count.(int) >= srv.config.ConnsPerUser {
 				log.Printf("[socks] failed to authenticate: max count of connections for %s has exceeded", username)
 				if _, err = conn.Write([]byte{
 					socksVer5,
