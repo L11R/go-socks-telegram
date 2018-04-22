@@ -13,6 +13,10 @@ import (
 	"time"
 )
 
+const (
+	timeoutDuration = 1 * time.Minute
+)
+
 var (
 	Commands = []string{"CONNECT", "BIND", "UDP ASSOCIATE"}
 
@@ -75,6 +79,7 @@ func netCopy(input, output net.Conn) (err error) {
 		}
 		if count > 0 {
 			output.Write(buf[:count])
+			output.SetDeadline(time.Now().Add(timeoutDuration))
 		}
 	}
 	return
@@ -391,6 +396,7 @@ func (srv *Server) handleConnection(conn net.Conn) {
 			}
 		}
 
+		fmt.Println("[socks] closing connection...")
 		conn.Close()
 	}()
 
