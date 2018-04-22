@@ -405,7 +405,7 @@ func (srv *Server) handleConnection(conn net.Conn) {
 	// Check username in Payload map
 	if username, found := auth.Payload["username"]; found {
 		// Get count of connections from sync.Map
-		if count, found := srv.UserConns.Load(auth.Payload["Username"]); found {
+		if count, found := srv.UserConns.Load(username); found {
 			// Don't forget to decrement one connection after closing it
 			defer srv.UserConns.Store(username, count.(int)-1)
 
