@@ -406,6 +406,9 @@ func (srv *Server) handleConnection(conn net.Conn) {
 	if username, found := auth.Payload["username"]; found {
 		// Get count of connections from sync.Map
 		if count, found := srv.UserConns.Load(username); found {
+			// Increment one connection
+			srv.UserConns.Store(username, count.(int)+1)
+
 			// Don't forget to decrement one connection after closing it
 			defer srv.UserConns.Store(username, count.(int)-1)
 
@@ -421,9 +424,6 @@ func (srv *Server) handleConnection(conn net.Conn) {
 
 				return
 			}
-
-			// Increment one connection
-			srv.UserConns.Store(username, count.(int)+1)
 		} else {
 			// If there are no connections, store one
 			srv.UserConns.Store(username, 1)
