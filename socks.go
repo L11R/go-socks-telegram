@@ -79,7 +79,7 @@ func netCopy(input, output net.Conn) (err error) {
 		}
 		if count > 0 {
 			output.Write(buf[:count])
-			output.SetDeadline(time.Now().Add(timeoutDuration))
+			//output.SetDeadline(time.Now().Add(timeoutDuration))
 		}
 	}
 	return
